@@ -1,5 +1,6 @@
 # Model arguments
-model_name_or_path: alignment-handbook/zephyr-7b-sft-lora
+model_name_or_path: "stabilityai/StableBeluga-13B"
+use_flash_attention_2: true
 torch_dtype: auto
 
 # LoRA arguments
@@ -26,9 +27,9 @@ preprocessing_num_workers: 12
 bf16: true
 beta: 0.1
 do_eval: true
-evaluation_strategy: epoch
+evaluation_strategy: "steps"
 eval_steps: 100
-gradient_accumulation_steps: 32
+gradient_accumulation_steps: 2
 gradient_checkpointing: true
 gradient_checkpointing_kwargs:
   use_reentrant: false
@@ -40,11 +41,12 @@ max_length: 1536
 max_prompt_length: 512
 num_train_epochs: 1
 optim: rmsprop
-output_dir: data/zephyr-7b-dpo-lora # It is handy to append `hub_model_revision` to keep track of your local experiments
-per_device_train_batch_size: 2
+output_dir: data/PE-13b-lora # It is handy to append `hub_model_revision` to keep track of your local experiments
+per_device_train_batch_size: 6
 per_device_eval_batch_size: 4
 push_to_hub: true
-save_strategy: "no"
+save_strategy: "steps"
+save_steps: 100
 save_total_limit: null
 seed: 42
 warmup_ratio: 0.1

@@ -41,18 +41,32 @@ from alignment import (
 )
 from trl import SFTTrainer
 
+from datasets import load_dataset
+import os
 
 logger = logging.getLogger(__name__)
+
+def construct_sys_prompt(pink_elephant, domain):
+    return str("### System: You are a harmless and helpful system built for answering questions related to {}. " + \
+               "You are not allowed to bring up {} in your answers, but respond with something " + \
+               "related to {}.").format(domain, pink_elephant, domain)
+
+def dataset_map(elem):
+    # elem contains "pink_elephant", "domain", "prompt", "accepted", "rejected"
+    # first construct the system prompt. 
+
+    # construct the system prompt
+    sys_prompt = construct_sys_prompt(elem["pink_elephant"], elem["domain"])
+
+    # Append \n\n and elemn['prompt'] to sys_prompt
+    sys_prompt = sys_prompt + "\n\n" + elem["prompt"]
+
+    return {"text": sys_prompt + elem["accepted"]}
 
 
 def main():
     parser = H4ArgumentParser((ModelArguments, DataArguments, SFTConfig))
     model_args, data_args, training_args = parser.parse()
-
-    # Set seed for reproducibility
-    set_seed(training_args.seed)
-
-    accelerator = Accelerator()
 
     ###############
     # Setup logging
@@ -78,6 +92,11 @@ def main():
     logger.info(f"Data parameters {data_args}")
     logger.info(f"Training/evaluation parameters {training_args}")
 
+    # Set seed for reproducibility
+    set_seed(training_args.seed)
+
+    accelerator = Accelerator()
+
     ###############
     # Load datasets
     ###############
@@ -91,16 +110,23 @@ def main():
     ################
     tokenizer = get_tokenizer(model_args, data_args)
 
-    #####################
-    # Apply chat template
-    #####################
-    raw_datasets = raw_datasets.map(apply_chat_template, fn_kwargs={"tokenizer": tokenizer, "task": "sft"})
-    train_dataset = raw_datasets["train"]
-    eval_dataset = raw_datasets["test"]
+    # dir var
+    dir = "~/.cache/huggingface/datasets/RLAIF___pink-elephants-offline-rl/default/0.0.0/f310cd71d57f00d2"
+    # convert to absolute path
+    dir = os.path.expanduser(dir)
 
-    with training_args.main_process_first(desc="Log a few random samples from the processed training set"):
-        for index in random.sample(range(len(raw_datasets["train"])), 3):
-            logger.info(f"Sample {index} of the processed training set:\n\n{raw_datasets['train'][index]['text']}")
+    # Replace column names with what TRL needs, text_chosen -> chosen and text_rejected -> rejected
+    raw_dataset = load_dataset(dir)['train']
+    # filter out any element where 'scores' == [-1,-1]
+    raw_dataset = raw_dataset.filter(lambda x: x['scores'] != [-1,-1])
+
+    # create a train and test split, with 2% of the data as test
+    raw_dataset = raw_dataset.train_test_split(test_size=0.02)
+
+    # use dataset map for both test and train
+    train_dataset = raw_dataset["train"].map(dataset_map)
+    eval_dataset = raw_dataset["test"].map(dataset_map)
+
 
     #######################
     # Load pretrained model

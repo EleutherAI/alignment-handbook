@@ -37,9 +37,28 @@ from alignment import (
 from peft import PeftConfig, PeftModel
 from trl import DPOTrainer
 
+from datasets import load_dataset
+import os 
+
 
 logger = logging.getLogger(__name__)
 
+def construct_sys_prompt(pink_elephant, domain):
+    return str("### System: You are a harmless and helpful system built for answering questions related to {}. " + \
+               "You are not allowed to bring up {} in your answers, but respond with something " + \
+               "related to {}.").format(domain, pink_elephant, domain)
+
+def dataset_map(elem):
+    # elem contains "pink_elephant", "domain", "prompt", "accepted", "rejected"
+    # first construct the system prompt. 
+
+    # construct the system prompt
+    sys_prompt = construct_sys_prompt(elem["pink_elephant"], elem["domain"])
+
+    # Append \n\n and elemn['prompt'] to sys_prompt
+    sys_prompt = sys_prompt + "\n\n" + elem["prompt"]
+
+    return { "prompt": sys_prompt, "chosen": elem["accepted"], "rejected": elem["rejected"] }
 
 def main():
     parser = H4ArgumentParser((ModelArguments, DataArguments, DPOConfig))
@@ -70,37 +89,28 @@ def main():
     # Increase distributed timeout to 3h to enable push to Hub to complete
     accelerator = Accelerator()
 
-    ###############
-    # Load datasets
-    ###############
-    raw_datasets = get_datasets(data_args, splits=data_args.dataset_splits)
-    logger.info(
-        f"Training on the following splits: {[split + ' : ' + str(dset.num_rows) for split, dset in raw_datasets.items()]}"
-    )
-    column_names = list(raw_datasets["train"].features)
-
     #####################################
     # Load tokenizer and process datasets
     #####################################
     data_args.truncation_side = "left"  # Truncate from left to ensure we don't lose labels in final turn
     tokenizer = get_tokenizer(model_args, data_args)
 
-    #####################
-    # Apply chat template
-    #####################
-    raw_datasets = raw_datasets.map(
-        apply_chat_template,
-        fn_kwargs={"tokenizer": tokenizer, "task": "dpo"},
-        num_proc=data_args.preprocessing_num_workers,
-        remove_columns=column_names,
-        desc="Formatting comparisons with prompt template",
-    )
+    # dir var
+    dir = "~/.cache/huggingface/datasets/RLAIF___pink-elephants-offline-rl/default/0.0.0/f310cd71d57f00d2"
+    # convert to absolute path
+    dir = os.path.expanduser(dir)
 
     # Replace column names with what TRL needs, text_chosen -> chosen and text_rejected -> rejected
-    for split in ["train", "test"]:
-        raw_datasets[split] = raw_datasets[split].rename_columns(
-            {"text_prompt": "prompt", "text_chosen": "chosen", "text_rejected": "rejected"}
-        )
+    raw_dataset = load_dataset(dir)['train']
+    # filter out any element where 'scores' == [-1,-1]
+    raw_dataset = raw_dataset.filter(lambda x: x['scores'] != [-1,-1])
+
+    # create a train and test split, with 2% of the data as test
+    raw_dataset = raw_dataset.train_test_split(test_size=0.02)
+
+    # use dataset map for both test and train
+    train_dataset = raw_dataset["train"].map(dataset_map)
+    test_dataset = raw_dataset["test"].map(dataset_map)
 
     torch_dtype = (
         model_args.torch_dtype if model_args.torch_dtype in ["auto", None] else getattr(torch, model_args.torch_dtype)
@@ -158,12 +168,13 @@ def main():
         ref_model_init_kwargs=ref_model_kwargs,
         args=training_args,
         beta=training_args.beta,
-        train_dataset=raw_datasets["train"],
-        eval_dataset=raw_datasets["test"],
+        train_dataset=train_dataset,
+        eval_dataset=test_dataset,
         tokenizer=tokenizer,
         max_length=training_args.max_length,
         max_prompt_length=training_args.max_prompt_length,
         peft_config=get_peft_config(model_args),
+        generate_during_eval=True,
     )
 
     ###############
@@ -172,9 +183,9 @@ def main():
     train_result = dpo_trainer.train()
     metrics = train_result.metrics
     max_train_samples = (
-        data_args.max_train_samples if data_args.max_train_samples is not None else len(raw_datasets["train"])
+        data_args.max_train_samples if data_args.max_train_samples is not None else len(train_dataset)
     )
-    metrics["train_samples"] = min(max_train_samples, len(raw_datasets["train"]))
+    metrics["train_samples"] = min(max_train_samples, len(train_dataset))
     dpo_trainer.log_metrics("train", metrics)
     dpo_trainer.save_metrics("train", metrics)
     dpo_trainer.save_state()
@@ -188,9 +199,9 @@ def main():
         logger.info("*** Evaluate ***")
         metrics = dpo_trainer.evaluate()
         max_eval_samples = (
-            data_args.max_eval_samples if data_args.max_eval_samples is not None else len(raw_datasets["test"])
+            data_args.max_eval_samples if data_args.max_eval_samples is not None else len(test_dataset)
         )
-        metrics["eval_samples"] = min(max_eval_samples, len(raw_datasets["test"]))
+        metrics["eval_samples"] = min(max_eval_samples, len(test_dataset))
         dpo_trainer.log_metrics("eval", metrics)
         dpo_trainer.save_metrics("eval", metrics)
 
